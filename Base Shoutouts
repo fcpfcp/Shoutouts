@@ -1,0 +1,251 @@
+/*
+Base Shoutouts — Farcaster mini app (single-file React component)
+
+What this contains:
+- React component (default export) that provides a simple UI to:
+  * connect Ethereum wallet (MetaMask)
+  * write a "shoutout" (short message)
+  * sign the message with the user's wallet (EIP-191 personal_sign)
+  * POST the shoutout + signature to a backend endpoint (/api/shout)
+  * show a mock feed (fetched from /api/shouts)
+
+Notes / next steps:
+- You must implement a server-side endpoint (/api/shout) to verify the signature and then post to Farcaster (using the Farcaster API or Warpcast) OR store and relay the shoutouts.
+- For production, secure your FARCASTER API key / relay credentials in server env vars; do signature verification server-side.
+- This file uses Tailwind classes for styling (no imports needed for tailwind in this file but your app should have Tailwind set up).
+
+Server example (Node/Express + verify signature) is included below after the component.
+*/
+
+import React, { useEffect, useState } from "react";
+
+export default function BaseShoutoutsMiniApp() {
+  const [address, setAddress] = useState(null);
+  const [msg, setMsg] = useState("");
+  const [status, setStatus] = useState("");
+  const [feed, setFeed] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    // try to read connected account on mount
+    if (window.ethereum) {
+      window.ethereum.request({ method: "eth_accounts" }).then((accounts) => {
+        if (accounts && accounts.length) setAddress(accounts[0]);
+      });
+
+      window.ethereum.on && window.ethereum.on("accountsChanged", (accounts) => {
+        setAddress(accounts && accounts[0] ? accounts[0] : null);
+      });
+    }
+
+    fetchFeed();
+  }, []);
+
+  async function connectWallet() {
+    if (!window.ethereum) {
+      setStatus("MetaMask / Ethereum provider not found.");
+      return;
+    }
+    try {
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+      setAddress(accounts[0]);
+      setStatus("Connected: " + accounts[0]);
+    } catch (e) {
+      setStatus("Connection rejected.");
+    }
+  }
+
+  async function fetchFeed() {
+    try {
+      const res = await fetch("/api/shouts");
+      if (!res.ok) throw new Error("Failed to fetch feed");
+      const data = await res.json();
+      setFeed(data.slice(0, 50));
+    } catch (e) {
+      // fallback to empty/mock feed
+      setFeed([]);
+    }
+  }
+
+  async function postShoutout() {
+    if (!address) {
+      setStatus("Please connect your wallet first.");
+      return;
+    }
+    if (!msg || msg.trim().length === 0) {
+      setStatus("Message empty.");
+      return;
+    }
+
+    setLoading(true);
+    setStatus("Signing message...");
+
+    try {
+      // create a payload to sign (keep it small and deterministic)
+      const payload = JSON.stringify({
+        type: "base-shoutout",
+        body: msg.trim(),
+        timestamp: Date.now(),
+      });
+
+      // personal_sign expects hex or utf8 depending on provider; here we use eth_signTypedData/v4 is ideal
+      // but for maximum compatibility we'll use personal_sign with utf8 message
+      const from = address;
+      const provider = window.ethereum;
+
+      // Using personal_sign: params [message, account]
+      const signature = await provider.request({
+        method: "personal_sign",
+        params: [payload, from],
+      });
+
+      setStatus("Sending shoutout to server...");
+
+      const res = await fetch("/api/shout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: from, payload, signature }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || "Server error");
+      }
+
+      const json = await res.json();
+      setStatus("Shoutout posted! ID: " + (json.id || "(no id returned)"));
+      setMsg("");
+      fetchFeed();
+    } catch (err) {
+      setStatus("Error: " + (err.message || err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto p-4">
+      <header className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold">Base Shoutouts — Farcaster Mini App</h1>
+        <div>
+          {address ? (
+            <div className="text-sm">Connected: <span className="font-mono">{shortAddr(address)}</span></div>
+          ) : (
+            <button onClick={connectWallet} className="px-3 py-1 rounded-lg border">Connect Wallet</button>
+          )}
+        </div>
+      </header>
+
+      <section className="mb-6 p-4 border rounded-lg">
+        <label className="block text-sm mb-2">Write a shoutout (max 280 chars)</label>
+        <textarea
+          value={msg}
+          onChange={(e) => setMsg(e.target.value.slice(0, 280))}
+          rows={4}
+          className="w-full p-2 rounded resize-none border"
+          placeholder="Give someone a shoutout..."
+        />
+        <div className="flex items-center justify-between mt-3">
+          <div className="text-xs text-muted">{msg.length}/280</div>
+          <div>
+            <button
+              onClick={postShoutout}
+              disabled={loading}
+              className="px-4 py-2 rounded bg-gradient-to-r from-blue-500 to-indigo-600 text-white disabled:opacity-60"
+            >
+              {loading ? "Posting..." : "Post Shoutout"}
+            </button>
+          </div>
+        </div>
+        <div className="mt-2 text-sm text-gray-600">Status: {status}</div>
+      </section>
+
+      <section>
+        <h2 className="text-xl font-semibold mb-3">Feed</h2>
+        <div className="space-y-3">
+          {feed.length === 0 && <div className="text-sm text-gray-500">No shoutouts yet.</div>}
+          {feed.map((s) => (
+            <article key={s.id || s.timestamp} className="p-3 border rounded">
+              <div className="flex items-center justify-between mb-2">
+                <div className="font-mono text-sm">{shortAddr(s.address)}</div>
+                <div className="text-xs text-gray-500">{new Date(s.timestamp).toLocaleString()}</div>
+              </div>
+              <div className="whitespace-pre-wrap">{s.body}</div>
+            </article>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function shortAddr(a) {
+  if (!a) return "";
+  return a.slice(0, 6) + "…" + a.slice(-4);
+}
+
+
+/* -------------------------
+   Example server code (Node + Express)
+   Save as: server.js (this is a minimal starting point)
+
+   npm install express body-parser ethers dotenv node-fetch
+
+   NOTE: This server only verifies the signature and returns a simple stored shout.
+   Replace the storage logic with Farcaster API calls (warpcast) or your relay.
+---------------------------*/
+
+/*
+// server.js
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const { ethers } = require('ethers');
+const app = express();
+app.use(bodyParser.json());
+
+// simple in-memory store (for demo only)
+const SHOUTS = [];
+
+app.get('/api/shouts', (req, res) => {
+  // return newest first
+  res.json(SHOUTS.slice().reverse());
+});
+
+app.post('/api/shout', async (req, res) => {
+  try {
+    const { address, payload, signature } = req.body;
+    if (!address || !payload || !signature) return res.status(400).send('missing');
+
+    // recover signer address
+    // personal_sign signs the message by prefixing "\x19Ethereum Signed Message:\n" + len
+    const recovered = ethers.utils.verifyMessage(payload, signature);
+    if (recovered.toLowerCase() !== address.toLowerCase()) {
+      return res.status(400).send('signature mismatch');
+    }
+
+    // Now you can either store the shout locally or forward to Farcaster using their API
+    const shout = { id: SHOUTS.length + 1, address, body: JSON.parse(payload).body, timestamp: JSON.parse(payload).timestamp };
+    SHOUTS.push(shout);
+
+    // OPTIONAL: call Farcaster / Warpcast here with your API key to create a cast on behalf of a server key
+    // Important: posting directly to Farcaster typically requires server-side credentials — do NOT expose them in the frontend.
+
+    res.json({ ok: true, id: shout.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('server error');
+  }
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log('Server listening on', port));
+*/
+
+/*
+Deployment notes & improvements:
+- Add rate limit & spam protection.
+- Add JWT/session logic if you want additional server-side user sessions.
+- If you want to post *into* Farcaster (create casts on-chain), you'll need to use their official SDK / API and follow their auth model. Typically you'd have a server key that can publish or use Oauth flows.
+- Consider adding optimistic UI and editing / deleting shoutouts.
+*/
